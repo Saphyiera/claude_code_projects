@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Live ZH ↔ EN Translator</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>Live Translator</h1>
+    <div class="controls">
+      <button id="toggleBtn" class="btn-start">Start</button>
+      <span id="status" class="status">Idle</span>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="col col-left">
+      <div class="col-header">
+        <span class="flag">EN</span>
+        <span class="arrow">→</span>
+        <span class="flag">ZH</span>
+        <span class="col-title">English → Chinese</span>
+      </div>
+      <div id="leftCol" class="feed"></div>
+    </section>
+
+    <div class="divider"></div>
+
+    <section class="col col-right">
+      <div class="col-header">
+        <span class="flag">ZH</span>
+        <span class="arrow">→</span>
+        <span class="flag">EN</span>
+        <span class="col-title">Chinese → English</span>
+      </div>
+      <div id="rightCol" class="feed"></div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="app.js"></script>
+</body>
+</html>
