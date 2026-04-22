@@ -1,176 +1,122 @@
-const TIMESLICE_MS = 3000;
-
 const toggleBtn = document.getElementById("toggleBtn");
 const statusEl = document.getElementById("status");
-const levelEl = document.getElementById("level");
 const leftCol = document.getElementById("leftCol");
 const rightCol = document.getElementById("rightCol");
 const toast = document.getElementById("toast");
 
-let ws = null;
-let recorder = null;
-let stream = null;
-let audioCtx = null;
-let analyser = null;
-let levelRaf = 0;
+let recognizers = [];
 let running = false;
-let reconnectTimer = 0;
 
 function setStatus(text) { statusEl.textContent = text; }
 
-function showToast(msg, durationMs = 3500) {
+function showToast(msg, durationMs = 4000) {
   toast.textContent = msg;
   toast.classList.remove("hidden");
   clearTimeout(showToast._t);
   showToast._t = setTimeout(() => toast.classList.add("hidden"), durationMs);
 }
 
-function pickMimeType() {
-  const candidates = [
-    "audio/webm;codecs=opus",
-    "audio/webm",
-    "audio/mp4",
-    "audio/ogg;codecs=opus",
-  ];
-  for (const c of candidates) {
-    if (window.MediaRecorder && MediaRecorder.isTypeSupported(c)) return c;
-  }
-  return "";
+if (!("webkitSpeechRecognition" in window) && !("SpeechRecognition" in window)) {
+  toggleBtn.disabled = true;
+  setStatus("Unsupported browser");
+  showToast("Use Chrome or Edge for speech recognition support.", 0);
 }
 
-function openSocket() {
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
-  ws.binaryType = "arraybuffer";
-
-  ws.addEventListener("open", () => {
-    setStatus("Listening…");
-  });
-
-  ws.addEventListener("message", (ev) => {
-    let msg;
-    try { msg = JSON.parse(ev.data); } catch { return; }
-    if (msg.error) {
-      showToast(`Error: ${msg.error}`);
-      return;
-    }
-    if (msg.skipped) {
-      if (msg.reason && msg.reason.startsWith("unsupported_language")) {
-        showToast(`Skipped: ${msg.reason}`);
-      }
-      return;
-    }
-    renderBubble(msg);
-  });
-
-  ws.addEventListener("close", () => {
-    if (running) {
-      setStatus("Reconnecting…");
-      showToast("Connection lost; reconnecting");
-      clearTimeout(reconnectTimer);
-      reconnectTimer = setTimeout(openSocket, 2000);
-    } else {
-      setStatus("Idle");
-    }
-  });
-
-  ws.addEventListener("error", () => {
-    setStatus("WebSocket error");
-  });
-}
-
-function renderBubble(msg) {
-  const col = msg.side === "left" ? leftCol : rightCol;
+function makeBubble(sourceText, translatedText) {
   const div = document.createElement("div");
   div.className = "bubble";
   const src = document.createElement("div");
   src.className = "source";
-  src.textContent = msg.sourceText;
+  src.textContent = sourceText;
   const tgt = document.createElement("div");
   tgt.className = "target";
-  tgt.textContent = msg.targetText;
+  tgt.textContent = "…";
   const ts = document.createElement("div");
   ts.className = "ts";
   ts.textContent = new Date().toLocaleTimeString();
   div.append(src, tgt, ts);
+  return { div, tgt };
+}
+
+async function handleResult(transcript, sourceLang, targetLang, col) {
+  const { div, tgt } = makeBubble(transcript, "…");
   col.append(div);
+  col.scrollTop = col.scrollHeight;
+
+  try {
+    const res = await fetch("/translate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: transcript, source: sourceLang, target: targetLang }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    tgt.textContent = data.translation;
+  } catch (e) {
+    tgt.textContent = "[translation error]";
+    tgt.style.color = "#f87171";
+    showToast(`Translation error: ${e.message}`);
+  }
   col.scrollTop = col.scrollHeight;
 }
 
-function startLevelMeter() {
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  const src = audioCtx.createMediaStreamSource(stream);
-  analyser = audioCtx.createAnalyser();
-  analyser.fftSize = 512;
-  src.connect(analyser);
-  const buf = new Uint8Array(analyser.fftSize);
-  const tick = () => {
-    analyser.getByteTimeDomainData(buf);
-    let sum = 0;
-    for (let i = 0; i < buf.length; i++) {
-      const v = (buf[i] - 128) / 128;
-      sum += v * v;
+function createRecognizer(lang, sourceLang, targetLang, col) {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const r = new SR();
+  r.lang = lang;
+  r.continuous = true;
+  r.interimResults = false;
+  r.maxAlternatives = 1;
+
+  r.onresult = (e) => {
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) {
+        const transcript = e.results[i][0].transcript.trim();
+        if (transcript) handleResult(transcript, sourceLang, targetLang, col);
+      }
     }
-    const rms = Math.sqrt(sum / buf.length);
-    const pct = Math.min(100, Math.round(rms * 300));
-    levelEl.style.setProperty("--level", pct + "%");
-    levelRaf = requestAnimationFrame(tick);
   };
-  tick();
+
+  r.onerror = (e) => {
+    if (e.error === "no-speech") return;
+    if (e.error === "aborted") return;
+    showToast(`Recognition error (${lang}): ${e.error}`);
+  };
+
+  r.onend = () => {
+    if (running) {
+      try { r.start(); } catch (_) {}
+    }
+  };
+
+  return r;
 }
 
-function stopLevelMeter() {
-  cancelAnimationFrame(levelRaf);
-  if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; }
-  analyser = null;
-  levelEl.style.setProperty("--level", "0%");
-}
-
-async function start() {
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  } catch (e) {
-    showToast("Microphone permission denied");
-    return;
-  }
-  const mimeType = pickMimeType();
-  if (!mimeType) {
-    showToast("MediaRecorder not supported in this browser");
-    return;
-  }
-
+function start() {
   running = true;
   toggleBtn.textContent = "Stop";
   toggleBtn.classList.remove("btn-start");
   toggleBtn.classList.add("btn-stop");
-  setStatus("Connecting…");
+  setStatus("Listening…");
 
-  openSocket();
-  startLevelMeter();
+  // zh-CN listener → right column (ZH → EN)
+  const zhR = createRecognizer("zh-CN", "zh", "en", rightCol);
+  // en-US listener → left column (EN → ZH)
+  const enR = createRecognizer("en-US", "en", "zh", leftCol);
 
-  recorder = new MediaRecorder(stream, { mimeType });
-  recorder.addEventListener("dataavailable", async (e) => {
-    if (!e.data || e.data.size === 0) return;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const buf = await e.data.arrayBuffer();
-    ws.send(buf);
-  });
-  recorder.start(TIMESLICE_MS);
+  recognizers = [zhR, enR];
+  zhR.start();
+  enR.start();
 }
 
 function stop() {
   running = false;
-  clearTimeout(reconnectTimer);
+  recognizers.forEach((r) => { try { r.stop(); } catch (_) {} });
+  recognizers = [];
   toggleBtn.textContent = "Start";
   toggleBtn.classList.remove("btn-stop");
   toggleBtn.classList.add("btn-start");
   setStatus("Idle");
-
-  if (recorder && recorder.state !== "inactive") recorder.stop();
-  recorder = null;
-  if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
-  stopLevelMeter();
-  if (ws) { ws.close(); ws = null; }
 }
 
 toggleBtn.addEventListener("click", () => {

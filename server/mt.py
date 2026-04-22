@@ -1,52 +1,75 @@
-"""Machine translation using Helsinki-NLP OPUS-MT.
-
-Two pipelines, lazily loaded on first use.
-"""
+"""Translation via Claude API using session Bearer token or ANTHROPIC_API_KEY."""
+import os
 import logging
-from threading import Lock
-from transformers import pipeline
+import httpx
 
 log = logging.getLogger(__name__)
 
-_ZH_EN_NAME = "Helsinki-NLP/opus-mt-zh-en"
-_EN_ZH_NAME = "Helsinki-NLP/opus-mt-en-zh"
+_TOKEN_FILE = os.environ.get(
+    "CLAUDE_SESSION_INGRESS_TOKEN_FILE",
+    "/home/claude/.claude/remote/.session_ingress_token",
+)
+_ANTHROPIC_BASE = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+MODEL = "claude-haiku-4-5-20251001"
 
-_zh_en = None
-_en_zh = None
-_lock = Lock()
-
-
-def _get_zh_en():
-    global _zh_en
-    if _zh_en is None:
-        with _lock:
-            if _zh_en is None:
-                log.info("Loading MT model %s", _ZH_EN_NAME)
-                _zh_en = pipeline("translation", model=_ZH_EN_NAME)
-    return _zh_en
+_SYSTEM = (
+    "You are a translation engine. "
+    "Return ONLY the translated text. "
+    "No romanization, no parentheses, no explanations."
+)
 
 
-def _get_en_zh():
-    global _en_zh
-    if _en_zh is None:
-        with _lock:
-            if _en_zh is None:
-                log.info("Loading MT model %s", _EN_ZH_NAME)
-                _en_zh = pipeline("translation", model=_EN_ZH_NAME)
-    return _en_zh
+def _load_token() -> tuple[str, str]:
+    """Return (token, auth_scheme) where auth_scheme is 'bearer' or 'apikey'."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if api_key:
+        return api_key, "apikey"
+    try:
+        with open(_TOKEN_FILE) as f:
+            return f.read().strip(), "bearer"
+    except FileNotFoundError:
+        raise RuntimeError(
+            "No ANTHROPIC_API_KEY and no session token found. "
+            "Set ANTHROPIC_API_KEY to use this service."
+        )
 
 
-def zh_to_en(text: str) -> str:
-    out = _get_zh_en()(text, max_length=512)
-    return out[0]["translation_text"].strip()
+_token, _auth_scheme = _load_token()
 
 
-def en_to_zh(text: str) -> str:
-    out = _get_en_zh()(text, max_length=512)
-    return out[0]["translation_text"].strip()
+def _headers() -> dict:
+    if _auth_scheme == "bearer":
+        return {
+            "Authorization": f"Bearer {_token}",
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+    return {
+        "x-api-key": _token,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
 
 
-def warmup() -> None:
-    """Optional: force both models to load up front (hides first-call latency)."""
-    _get_zh_en()
-    _get_en_zh()
+def translate(text: str, source: str, target: str) -> str:
+    if source == "en" and target == "zh":
+        prompt = f"Translate to Simplified Chinese:\n{text}"
+    elif source == "zh" and target == "en":
+        prompt = f"Translate to English:\n{text}"
+    else:
+        raise ValueError(f"Unsupported language pair: {source}→{target}")
+
+    payload = {
+        "model": MODEL,
+        "max_tokens": 512,
+        "system": _SYSTEM,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    resp = httpx.post(
+        f"{_ANTHROPIC_BASE}/v1/messages",
+        headers=_headers(),
+        json=payload,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()["content"][0]["text"].strip()
