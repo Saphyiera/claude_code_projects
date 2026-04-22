@@ -22,6 +22,40 @@ if (!("webkitSpeechRecognition" in window) && !("SpeechRecognition" in window)) 
   showToast("Use Chrome or Edge — Firefox does not support the Web Speech API.", 0);
 }
 
+// --- language script filters ---
+// Drop transcripts whose script doesn't match the expected language.
+// The Web Speech API is locked to a single language per recognizer, but it
+// will happily hallucinate output when fed a different language (e.g. speaking
+// Vietnamese into a zh-CN recognizer produces nonsense Chinese). These checks
+// reject obvious mismatches by looking at the characters actually produced.
+
+const CJK_RE = /[㐀-䶿一-鿿豈-﫿]/;
+const CJK_GLOBAL_RE = /[㐀-䶿一-鿿豈-﫿]/g;
+// Vietnamese-only diacritics (not used in English)
+const VI_DIACRITICS_RE = /[ăâđêôơưĂÂĐÊÔƠƯàáảãạằắẳẵặầấẩẫậèéẻẽẹềếểễệìíỉĩịòóỏõọồốổỗộờớởỡợùúủũụừứửữựỳýỷỹỵÀÁẢÃẠẰẮẲẴẶẦẤẨẪẬÈÉẺẼẸỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌỒỐỔỖỘỜỚỞỠỢÙÚỦŨỤỪỨỬỮỰỲÝỶỸỴ]/;
+const LATIN_LETTER_RE = /[a-zA-Z]/;
+
+function looksChinese(text) {
+  // Must contain at least one CJK ideograph and be majority CJK.
+  const cjk = (text.match(CJK_GLOBAL_RE) || []).length;
+  if (cjk === 0) return false;
+  const letters = (text.match(/[\p{L}]/gu) || []).length;
+  return letters === 0 || cjk / letters >= 0.5;
+}
+
+function looksEnglish(text) {
+  // Reject any CJK and any Vietnamese-specific diacritics.
+  if (CJK_RE.test(text)) return false;
+  if (VI_DIACRITICS_RE.test(text)) return false;
+  return LATIN_LETTER_RE.test(text);
+}
+
+function passesFilter(text, sl) {
+  if (sl === "zh-CN") return looksChinese(text);
+  if (sl === "en")    return looksEnglish(text);
+  return true;
+}
+
 async function translate(text, sl, tl) {
   const url =
     "https://translate.googleapis.com/translate_a/single" +
@@ -76,10 +110,14 @@ function createRecognizer(lang, sl, tl, col) {
 
   r.onresult = (e) => {
     for (let i = e.resultIndex; i < e.results.length; i++) {
-      if (e.results[i].isFinal) {
-        const t = e.results[i][0].transcript.trim();
-        if (t) handleResult(t, sl, tl, col);
+      if (!e.results[i].isFinal) continue;
+      const t = e.results[i][0].transcript.trim();
+      if (!t) continue;
+      if (!passesFilter(t, sl)) {
+        console.debug(`[filter] dropped ${sl} transcript:`, t);
+        continue;
       }
+      handleResult(t, sl, tl, col);
     }
   };
 
