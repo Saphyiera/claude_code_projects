@@ -14,7 +14,7 @@ self.onmessage = async (event) => {
       return;
     }
     try {
-      translator = await pipeline('translation', 'Helsinki-NLP/opus-mt-zh-en', {
+      translator = await pipeline('translation', 'Xenova/opus-mt-zh-en', {
         progress_callback: (progress) => {
           self.postMessage({ type: 'progress', payload: progress });
         },
