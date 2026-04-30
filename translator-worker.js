@@ -9,6 +9,10 @@ self.onmessage = async (event) => {
   const { type, payload } = event.data;
 
   if (type === 'init') {
+    if (translator !== null) {
+      self.postMessage({ type: 'ready' });
+      return;
+    }
     try {
       translator = await pipeline('translation', 'Helsinki-NLP/opus-mt-zh-en', {
         progress_callback: (progress) => {
