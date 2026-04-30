@@ -18,6 +18,7 @@ const retryBtn         = document.getElementById('retry-btn');
 if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
   statusDot.className = 'status-dot error';
   statusText.textContent = 'Not supported — please use Chrome or Edge';
+  micBtn.disabled = true;
 }
 
 // --- Sentence queue ---
@@ -45,7 +46,8 @@ function initWorker() {
       statusText.textContent = 'Model ready';
       progressFill.style.width = '100%';
       progressFill.parentElement.setAttribute('aria-valuenow', 100);
-      micBtn.disabled = false;
+      const supported = ('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window);
+      if (supported) micBtn.disabled = false;
       hideError();
     }
     if (type === 'translation') {
@@ -95,9 +97,10 @@ function startListening() {
   };
 
   recognition.onerror = (event) => {
-    if (event.error !== 'aborted') {
-      listeningStatus.textContent = `error: ${event.error}`;
-    }
+    if (event.error === 'aborted') return;
+    listeningStatus.textContent = `error: ${event.error}`;
+    const fatal = ['not-allowed', 'service-not-allowed', 'network', 'audio-capture'];
+    if (fatal.includes(event.error)) stopListening();
   };
 
   recognition.onend = () => {
@@ -136,7 +139,9 @@ function escapeHtml(str) {
   return str
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
 }
 
 function appendEntry(chinese, english) {
