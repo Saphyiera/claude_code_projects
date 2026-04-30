@@ -35,7 +35,7 @@ function initWorker() {
 
   worker.onmessage = ({ data: { type, payload } }) => {
     if (type === 'progress') {
-      const pct = payload.progress != null ? Math.round(payload.progress * 100) : 0;
+      const pct = Math.min(100, Math.round(payload.progress ?? 0));
       progressFill.style.width = `${pct}%`;
       progressFill.parentElement.setAttribute('aria-valuenow', pct);
       statusText.textContent = `Loading model... ${pct}%`;
