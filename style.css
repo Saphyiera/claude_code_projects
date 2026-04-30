@@ -120,8 +120,14 @@ button {
 
 .entry {
   border-bottom: 1px solid #f1f3f5;
-  padding-bottom: 0.75rem;
+  padding: 0.4rem 0.5rem 0.75rem;
+  margin: 0 -0.5rem;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s;
 }
+.entry:hover { background: #f8f9fa; }
+.entry.copied { background: #d1f7d6; }
 .entry-time    { font-size: 0.75rem; color: #adb5bd; margin-bottom: 0.2rem; }
 .entry-chinese { color: #6c757d; font-size: 0.95rem; margin-bottom: 0.25rem; }
 .entry-english { font-weight: 600; font-size: 1rem; color: #212529; }
@@ -158,3 +164,19 @@ button {
   padding: 0.25rem 0.75rem;
 }
 #retry-btn:hover { background: rgba(255,255,255,0.35); }
+
+@media (prefers-color-scheme: dark) {
+  body { background: #16181c; color: #e9ecef; }
+  .model-status, #listening-status { color: #adb5bd; }
+  .transcript-container { background: #1f2228; border-color: #2d3138; }
+  .transcript-header { border-bottom-color: #2d3138; }
+  .entry { border-bottom-color: #2a2e35; }
+  .entry:hover { background: #23272e; }
+  .entry.copied { background: #1f3a26; }
+  .entry-chinese { color: #9aa3ad; }
+  .entry-english { color: #f1f3f5; }
+  .interim { color: #6c757d; }
+  #clear-btn { color: #adb5bd; }
+  #clear-btn:hover { background: #23272e; color: #f1f3f5; }
+  .progress-bar { background: #2d3138; }
+}

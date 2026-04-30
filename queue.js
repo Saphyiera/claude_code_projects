@@ -17,14 +17,21 @@ export class SentenceQueue {
 
   /** Mark a sentence as successfully translated. */
   resolve(id, translation) {
+    if (!this._texts.has(id) || this._results.has(id)) return;
     this._results.set(id, { original: this._texts.get(id), translation });
     this._flush();
   }
 
   /** Mark a sentence as failed. */
   resolveError(id) {
+    if (!this._texts.has(id) || this._results.has(id)) return;
     this._results.set(id, { original: this._texts.get(id), translation: '[Translation error]' });
     this._flush();
+  }
+
+  /** Number of sentences awaiting translation or in-order display. */
+  get pending() {
+    return this._texts.size;
   }
 
   _flush() {

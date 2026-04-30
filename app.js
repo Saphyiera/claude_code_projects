@@ -24,10 +24,12 @@ if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) 
 // --- Sentence queue ---
 const queue = new SentenceQueue((original, translation) => {
   appendEntry(original, translation);
+  updatePendingStatus();
 });
 
 // --- Worker ---
 let worker = null;
+let lastProgressPct = -1;
 
 function initWorker() {
   worker = new Worker('./translator-worker.js', { type: 'module' });
@@ -36,6 +38,8 @@ function initWorker() {
   worker.onmessage = ({ data: { type, payload } }) => {
     if (type === 'progress') {
       const pct = Math.min(100, Math.round(payload.progress ?? 0));
+      if (pct === lastProgressPct) return;
+      lastProgressPct = pct;
       progressFill.style.width = `${pct}%`;
       progressFill.parentElement.setAttribute('aria-valuenow', pct);
       statusText.textContent = `Loading model... ${pct}%`;
@@ -87,6 +91,7 @@ function startListening() {
         if (text && CHINESE_CHAR.test(text)) {
           const id = queue.add(text);
           worker.postMessage({ type: 'translate', payload: { id, text } });
+          updatePendingStatus();
         }
         interimEl.textContent = '';
       } else {
@@ -104,7 +109,18 @@ function startListening() {
   };
 
   recognition.onend = () => {
-    if (isListening) recognition.start(); // auto-restart for continuous mode
+    if (!isListening) return;
+    // auto-restart for continuous mode; guard against rapid-fire restarts that
+    // some browsers reject with InvalidStateError.
+    try {
+      recognition.start();
+    } catch {
+      setTimeout(() => {
+        if (isListening && recognition) {
+          try { recognition.start(); } catch { /* give up until user toggles */ }
+        }
+      }, 250);
+    }
   };
 
   recognition.start();
@@ -144,25 +160,57 @@ function escapeHtml(str) {
     .replace(/'/g, '&#x27;');
 }
 
+const MAX_ENTRIES = 200;
+
 function appendEntry(chinese, english) {
   const isError = english === '[Translation error]';
   const time = new Date().toTimeString().slice(0, 8);
 
   const entry = document.createElement('div');
   entry.className = 'entry';
+  entry.title = 'Click to copy translation';
+  entry.dataset.translation = english;
   entry.innerHTML =
     `<div class="entry-time">${time}</div>` +
     `<div class="entry-chinese">${escapeHtml(chinese)}</div>` +
     `<div class="entry-english${isError ? ' error' : ''}">${escapeHtml(english)}</div>`;
 
   transcript.insertBefore(entry, interimEl);
-  transcript.scrollTop = transcript.scrollHeight;
+
+  // Auto-scroll only if user is already near the bottom — preserves position
+  // when scrolling back to read older entries.
+  const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
+  if (atBottom) transcript.scrollTop = transcript.scrollHeight;
+
+  // Cap transcript size to keep long sessions from leaking memory.
+  const entries = transcript.querySelectorAll('.entry');
+  for (let i = 0; i < entries.length - MAX_ENTRIES; i++) {
+    entries[i].remove();
+  }
+}
+
+function updatePendingStatus() {
+  if (!isListening) return;
+  const n = queue.pending;
+  listeningStatus.textContent = n > 0 ? `listening... (${n} pending)` : 'listening...';
 }
 
 // --- Clear ---
 clearBtn.addEventListener('click', () => {
   transcript.querySelectorAll('.entry').forEach(e => e.remove());
   interimEl.textContent = '';
+});
+
+// --- Click an entry to copy its English translation ---
+transcript.addEventListener('click', (event) => {
+  const entry = event.target.closest('.entry');
+  if (!entry || !navigator.clipboard) return;
+  const text = entry.dataset.translation;
+  if (!text || text === '[Translation error]') return;
+  navigator.clipboard.writeText(text).then(() => {
+    entry.classList.add('copied');
+    setTimeout(() => entry.classList.remove('copied'), 600);
+  }).catch(() => { /* clipboard refused; ignore */ });
 });
 
 // --- Error banner ---
@@ -183,6 +231,7 @@ retryBtn.addEventListener('click', () => {
   statusText.textContent = 'Loading model...';
   progressFill.style.width = '0%';
   progressFill.parentElement.setAttribute('aria-valuenow', 0);
+  lastProgressPct = -1;
   if (worker) worker.terminate();
   initWorker();
 });

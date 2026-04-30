@@ -85,4 +85,53 @@ import assert from 'assert';
   console.log('✓ Cascaded flush — item 2 held until item 1 resolves');
 }
 
+// Test 7: resolve() on unknown id is a no-op
+{
+  const results = [];
+  const q = new SentenceQueue((orig, trans) => results.push({ orig, trans }));
+  q.resolve(999, 'ghost');
+  q.resolveError(1234);
+  assert.deepStrictEqual(results, [], 'Test 7 failed — unknown ids must not emit');
+  console.log('✓ resolve()/resolveError() on unknown id is a no-op');
+}
+
+// Test 8: Double-resolve is ignored (first wins)
+{
+  const results = [];
+  const q = new SentenceQueue((orig, trans) => results.push({ orig, trans }));
+  const id0 = q.add('hi');
+  q.resolve(id0, 'hello');
+  q.resolve(id0, 'overwrite');     // ignored
+  q.resolveError(id0);             // ignored
+  assert.deepStrictEqual(results, [{ orig: 'hi', trans: 'hello' }], 'Test 8 failed');
+  console.log('✓ Double-resolve / resolve-after-error is ignored');
+}
+
+// Test 9: pending getter reflects outstanding sentences
+{
+  const q = new SentenceQueue(() => {});
+  assert.strictEqual(q.pending, 0, 'Test 9a failed');
+  const id0 = q.add('a');
+  const id1 = q.add('b');
+  assert.strictEqual(q.pending, 2, 'Test 9b failed');
+  q.resolve(id0, 'A');
+  assert.strictEqual(q.pending, 1, 'Test 9c failed — resolved entry should leave queue');
+  q.resolve(id1, 'B');
+  assert.strictEqual(q.pending, 0, 'Test 9d failed');
+}
+console.log('✓ pending getter tracks outstanding sentences');
+
+// Test 10: pending stays > 0 while later id is held waiting for earlier id
+{
+  const q = new SentenceQueue(() => {});
+  const id0 = q.add('a');
+  const id1 = q.add('b');
+  q.resolve(id1, 'B');
+  // id1 result is held; both entries still pending
+  assert.strictEqual(q.pending, 2, 'Test 10 failed — held results should still count as pending');
+  q.resolve(id0, 'A');
+  assert.strictEqual(q.pending, 0, 'Test 10b failed');
+  console.log('✓ pending counts held out-of-order results');
+}
+
 console.log('\nAll queue tests passed.');
