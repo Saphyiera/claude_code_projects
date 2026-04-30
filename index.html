@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live Chinese → English Translator</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>Live Chinese → English Translator</h1>
+      <div class="model-status">
+        <span class="status-dot" id="status-dot"></span>
+        <span id="status-text">Loading model...</span>
+        <div class="progress-bar">
+          <div class="progress-fill" id="progress-fill"></div>
+        </div>
+      </div>
+    </header>
+
+    <div class="controls">
+      <button id="mic-btn" disabled>Start Listening</button>
+      <span id="listening-status">idle</span>
+    </div>
+
+    <div class="transcript-container">
+      <div class="transcript-header">
+        <span>Transcript</span>
+        <button id="clear-btn">Clear</button>
+      </div>
+      <div class="transcript" id="transcript">
+        <div class="interim" id="interim"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="error-banner hidden" id="error-banner">
+    <span id="error-text"></span>
+    <button id="retry-btn">Retry</button>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
