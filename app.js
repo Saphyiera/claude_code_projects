@@ -67,6 +67,8 @@ function initWorker() {
 
   worker.onerror = (err) => {
     showError('Worker crashed: ' + err.message, false);
+    queue.failPending();
+    updatePendingStatus();
   };
 }
 
@@ -233,6 +235,8 @@ retryBtn.addEventListener('click', () => {
   progressFill.parentElement.setAttribute('aria-valuenow', 0);
   lastProgressPct = -1;
   if (worker) worker.terminate();
+  queue.failPending();
+  updatePendingStatus();
   initWorker();
 });
 

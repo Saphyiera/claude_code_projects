@@ -134,4 +134,64 @@ console.log('✓ pending getter tracks outstanding sentences');
   console.log('✓ pending counts held out-of-order results');
 }
 
+// Test 11: failPending() flushes every unresolved id as an error
+{
+  const results = [];
+  const q = new SentenceQueue((orig, trans) => results.push({ orig, trans }));
+  q.add('a');
+  q.add('b');
+  q.add('c');
+  q.failPending();
+  assert.deepStrictEqual(results, [
+    { orig: 'a', trans: '[Translation error]' },
+    { orig: 'b', trans: '[Translation error]' },
+    { orig: 'c', trans: '[Translation error]' },
+  ], 'Test 11 failed — failPending should flush every unresolved id in order');
+  assert.strictEqual(q.pending, 0, 'Test 11b failed — pending should be 0 after failPending');
+  console.log('✓ failPending() flushes every unresolved id as an error');
+}
+
+// Test 12: failPending() preserves already-resolved results and unblocks held ones
+{
+  const results = [];
+  const q = new SentenceQueue((orig, trans) => results.push({ orig, trans }));
+  const id0 = q.add('a');
+  const id1 = q.add('b');
+  const id2 = q.add('c');
+  q.resolve(id2, 'C'); // held behind id0/id1
+  q.failPending();
+  assert.deepStrictEqual(results, [
+    { orig: 'a', trans: '[Translation error]' },
+    { orig: 'b', trans: '[Translation error]' },
+    { orig: 'c', trans: 'C' },
+  ], 'Test 12 failed — held real result must be preserved, others fail in order');
+  assert.strictEqual(q.pending, 0, 'Test 12b failed');
+  console.log('✓ failPending() preserves held real results and drains the queue');
+}
+
+// Test 13: failPending() on an empty queue is a no-op
+{
+  const results = [];
+  const q = new SentenceQueue((o, t) => results.push({ o, t }));
+  q.failPending();
+  assert.deepStrictEqual(results, [], 'Test 13 failed — empty failPending must not emit');
+  assert.strictEqual(q.pending, 0, 'Test 13b failed');
+  console.log('✓ failPending() on empty queue is a no-op');
+}
+
+// Test 14: ids assigned after failPending() continue from where they left off
+{
+  const results = [];
+  const q = new SentenceQueue((o, t) => results.push({ o, t }));
+  q.add('old');
+  q.failPending();
+  const id1 = q.add('new');
+  q.resolve(id1, 'NEW');
+  assert.deepStrictEqual(results, [
+    { o: 'old', t: '[Translation error]' },
+    { o: 'new', t: 'NEW' },
+  ], 'Test 14 failed — post-failPending ids must still flush in order');
+  console.log('✓ Queue keeps emitting in order after failPending()');
+}
+
 console.log('\nAll queue tests passed.');

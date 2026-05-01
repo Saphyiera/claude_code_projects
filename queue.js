@@ -34,6 +34,23 @@ export class SentenceQueue {
     return this._texts.size;
   }
 
+  /**
+   * Mark every still-unresolved sentence as a translation error.
+   * Use when the worker is being torn down or has crashed so that
+   * orphaned ids don't linger in the queue forever.
+   */
+  failPending() {
+    for (const id of [...this._texts.keys()]) {
+      if (!this._results.has(id)) {
+        this._results.set(id, {
+          original: this._texts.get(id),
+          translation: '[Translation error]',
+        });
+      }
+    }
+    this._flush();
+  }
+
   _flush() {
     while (this._results.has(this._nextDisplay)) {
       const { original, translation } = this._results.get(this._nextDisplay);
