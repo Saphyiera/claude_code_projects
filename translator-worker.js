@@ -14,9 +14,12 @@ function loadPipeline(device) {
   // `device: 'webgpu'` routes inference through ONNX Runtime Web's WebGPU
   // backend. On NVIDIA Windows/Linux this lands on CUDA via the browser's
   // GPU stack. Pass undefined to use the default (wasm/CPU).
+  const effective = device && device !== 'wasm' ? device : 'wasm';
   const opts = {
     progress_callback: (progress) => {
-      self.postMessage({ type: 'progress', payload: progress });
+      // Tag progress with the device actually being loaded so the UI
+      // doesn't keep saying "Loading model on GPU..." after fallback.
+      self.postMessage({ type: 'progress', payload: { ...progress, device: effective } });
     },
   };
   if (device && device !== 'wasm') opts.device = device;

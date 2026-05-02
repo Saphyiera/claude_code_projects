@@ -64,7 +64,9 @@ function initWorker() {
       lastProgressPct = pct;
       progressFill.style.width = `${pct}%`;
       progressFill.parentElement.setAttribute('aria-valuenow', pct);
-      const label = devicePretty(requestedDevice);
+      // Prefer the device the worker is *actually* loading (set after a
+      // GPU→CPU fallback) over what the user originally asked for.
+      const label = devicePretty(payload.device ?? requestedDevice);
       statusText.textContent = `Loading model on ${label}... ${pct}%`;
       statusDot.className = 'status-dot loading';
     }
@@ -156,7 +158,18 @@ function startListening() {
     if (event.error === 'aborted') return;
     listeningStatus.textContent = `error: ${event.error}`;
     const fatal = ['not-allowed', 'service-not-allowed', 'network', 'audio-capture'];
-    if (fatal.includes(event.error)) stopListening();
+    if (fatal.includes(event.error)) { stopListening(); return; }
+    // Non-fatal (e.g. no-speech): clear the stale error label after a pause
+    // so the user doesn't stare at "error: no-speech" forever while we
+    // continue listening.
+    setTimeout(() => {
+      if (isListening && listeningStatus.textContent.startsWith('error:')) {
+        updatePendingStatus();
+        if (!listeningStatus.textContent.startsWith('listening')) {
+          listeningStatus.textContent = 'listening...';
+        }
+      }
+    }, 1500);
   };
 
   recognition.onend = () => {
@@ -212,6 +225,7 @@ function escapeHtml(str) {
 }
 
 const MAX_ENTRIES = 200;
+let entryCount = 0;
 
 function appendEntry(chinese, english) {
   const isError = english === '[Translation error]';
@@ -227,16 +241,20 @@ function appendEntry(chinese, english) {
     `<div class="entry-english${isError ? ' error' : ''}">${escapeHtml(english)}</div>`;
 
   transcript.insertBefore(entry, interimEl);
+  entryCount++;
 
   // Auto-scroll only if user is already near the bottom — preserves position
   // when scrolling back to read older entries.
   const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
   if (atBottom) transcript.scrollTop = transcript.scrollHeight;
 
-  // Cap transcript size to keep long sessions from leaking memory.
-  const entries = transcript.querySelectorAll('.entry');
-  for (let i = 0; i < entries.length - MAX_ENTRIES; i++) {
-    entries[i].remove();
+  // Cap transcript size. Counter + first-match query is amortized O(1) per
+  // append; the previous querySelectorAll('.entry') was O(n) every time.
+  while (entryCount > MAX_ENTRIES) {
+    const first = transcript.querySelector('.entry');
+    if (!first) { entryCount = 0; break; }
+    first.remove();
+    entryCount--;
   }
 }
 
@@ -249,6 +267,7 @@ function updatePendingStatus() {
 // --- Clear ---
 clearBtn.addEventListener('click', () => {
   transcript.querySelectorAll('.entry').forEach(e => e.remove());
+  entryCount = 0;
   interimEl.textContent = '';
 });
 
@@ -288,6 +307,14 @@ if (gpuSupported) {
     reloadWorker();
   });
 }
+
+// --- Warn before unload if translations are still in flight ---
+window.addEventListener('beforeunload', (e) => {
+  if (queue.pending > 0) {
+    e.preventDefault();
+    e.returnValue = ''; // some legacy browsers need a non-empty returnValue
+  }
+});
 
 // --- Init ---
 updateGpuBtn();
