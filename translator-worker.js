@@ -1,5 +1,6 @@
 // translator-worker.js
 import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+import { chunkText } from './chunker.js';
 
 env.allowLocalModels = false;
 
@@ -60,10 +61,24 @@ async function runTranslate(id, text) {
     return;
   }
   try {
-    const result = await translator(text);
+    // Chunk long inputs so opus-mt doesn't truncate them, and so we can
+    // hand the whole sentence to the model as a single batch — one forward
+    // pass through the encoder/decoder for all pieces.
+    const chunks = chunkText(text);
+    let translated;
+    if (chunks.length <= 1) {
+      const result = await translator(chunks[0] ?? text);
+      translated = result[0].translation_text;
+    } else {
+      const results = await translator(chunks);
+      translated = results
+        .map((r) => r.translation_text.trim())
+        .filter(Boolean)
+        .join(' ');
+    }
     self.postMessage({
       type: 'translation',
-      payload: { id, translated: result[0].translation_text },
+      payload: { id, translated },
     });
   } catch (err) {
     self.postMessage({ type: 'translation-error', payload: { id } });
