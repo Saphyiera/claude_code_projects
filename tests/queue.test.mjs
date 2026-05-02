@@ -4,7 +4,7 @@ import assert from 'assert';
 // Test 1: In-order resolution emits immediately
 {
   const results = [];
-  const q = new SentenceQueue((orig, trans) => results.push({ orig, trans }));
+  const q = new SentenceQueue((_id, orig, trans) => results.push({ orig, trans }));
   const id0 = q.add('一');
   q.resolve(id0, 'one');
   assert.deepStrictEqual(results, [{ orig: '一', trans: 'one' }], 'Test 1 failed');
@@ -14,7 +14,7 @@ import assert from 'assert';
 // Test 2: Out-of-order resolution holds later, then flushes all when earlier arrives
 {
   const results = [];
-  const q = new SentenceQueue((orig, trans) => results.push({ orig, trans }));
+  const q = new SentenceQueue((_id, orig, trans) => results.push({ orig, trans }));
   const id0 = q.add('一');
   const id1 = q.add('二');
 
@@ -32,7 +32,7 @@ import assert from 'assert';
 // Test 3: resolveError produces [Translation error]
 {
   const results = [];
-  const q = new SentenceQueue((orig, trans) => results.push({ orig, trans }));
+  const q = new SentenceQueue((_id, orig, trans) => results.push({ orig, trans }));
   const id0 = q.add('bad');
   q.resolveError(id0);
   assert.deepStrictEqual(results, [{ orig: 'bad', trans: '[Translation error]' }], 'Test 3 failed');
@@ -42,8 +42,8 @@ import assert from 'assert';
 // Test 4: Multiple queues are independent (no shared state)
 {
   const r1 = [], r2 = [];
-  const q1 = new SentenceQueue((o, t) => r1.push({ o, t }));
-  const q2 = new SentenceQueue((o, t) => r2.push({ o, t }));
+  const q1 = new SentenceQueue((_id, o, t) => r1.push({ o, t }));
+  const q2 = new SentenceQueue((_id, o, t) => r2.push({ o, t }));
   const id = q1.add('only q1');
   q1.resolve(id, 'only q1 translation');
   assert.deepStrictEqual(r2, [], 'Test 4 failed — q2 should be empty');
@@ -65,7 +65,7 @@ import assert from 'assert';
 // Test 6: Cascaded flush — item 2 arrives before item 1
 {
   const results = [];
-  const q = new SentenceQueue((orig, trans) => results.push({ orig, trans }));
+  const q = new SentenceQueue((_id, orig, trans) => results.push({ orig, trans }));
   const id0 = q.add('零');
   const id1 = q.add('一');
   const id2 = q.add('二');
@@ -88,7 +88,7 @@ import assert from 'assert';
 // Test 7: resolve() on unknown id is a no-op
 {
   const results = [];
-  const q = new SentenceQueue((orig, trans) => results.push({ orig, trans }));
+  const q = new SentenceQueue((_id, orig, trans) => results.push({ orig, trans }));
   q.resolve(999, 'ghost');
   q.resolveError(1234);
   assert.deepStrictEqual(results, [], 'Test 7 failed — unknown ids must not emit');
@@ -98,7 +98,7 @@ import assert from 'assert';
 // Test 8: Double-resolve is ignored (first wins)
 {
   const results = [];
-  const q = new SentenceQueue((orig, trans) => results.push({ orig, trans }));
+  const q = new SentenceQueue((_id, orig, trans) => results.push({ orig, trans }));
   const id0 = q.add('hi');
   q.resolve(id0, 'hello');
   q.resolve(id0, 'overwrite');     // ignored
@@ -137,7 +137,7 @@ console.log('✓ pending getter tracks outstanding sentences');
 // Test 11: failPending() flushes every unresolved id as an error
 {
   const results = [];
-  const q = new SentenceQueue((orig, trans) => results.push({ orig, trans }));
+  const q = new SentenceQueue((_id, orig, trans) => results.push({ orig, trans }));
   q.add('a');
   q.add('b');
   q.add('c');
@@ -154,7 +154,7 @@ console.log('✓ pending getter tracks outstanding sentences');
 // Test 12: failPending() preserves already-resolved results and unblocks held ones
 {
   const results = [];
-  const q = new SentenceQueue((orig, trans) => results.push({ orig, trans }));
+  const q = new SentenceQueue((_id, orig, trans) => results.push({ orig, trans }));
   const id0 = q.add('a');
   const id1 = q.add('b');
   const id2 = q.add('c');
@@ -172,7 +172,7 @@ console.log('✓ pending getter tracks outstanding sentences');
 // Test 13: failPending() on an empty queue is a no-op
 {
   const results = [];
-  const q = new SentenceQueue((o, t) => results.push({ o, t }));
+  const q = new SentenceQueue((_id, o, t) => results.push({ o, t }));
   q.failPending();
   assert.deepStrictEqual(results, [], 'Test 13 failed — empty failPending must not emit');
   assert.strictEqual(q.pending, 0, 'Test 13b failed');
@@ -182,7 +182,7 @@ console.log('✓ pending getter tracks outstanding sentences');
 // Test 14: ids assigned after failPending() continue from where they left off
 {
   const results = [];
-  const q = new SentenceQueue((o, t) => results.push({ o, t }));
+  const q = new SentenceQueue((_id, o, t) => results.push({ o, t }));
   q.add('old');
   q.failPending();
   const id1 = q.add('new');
@@ -192,6 +192,21 @@ console.log('✓ pending getter tracks outstanding sentences');
     { o: 'new', t: 'NEW' },
   ], 'Test 14 failed — post-failPending ids must still flush in order');
   console.log('✓ Queue keeps emitting in order after failPending()');
+}
+
+// Test 15: callback receives the id of the resolved sentence
+{
+  const events = [];
+  const q = new SentenceQueue((id, orig, trans) => events.push({ id, orig, trans }));
+  const id0 = q.add('a');
+  const id1 = q.add('b');
+  q.resolve(id0, 'A');
+  q.resolveError(id1);
+  assert.deepStrictEqual(events, [
+    { id: id0, orig: 'a', trans: 'A' },
+    { id: id1, orig: 'b', trans: '[Translation error]' },
+  ], 'Test 15 failed — id should be the first callback argument');
+  console.log('✓ Callback receives id of the resolved sentence');
 }
 
 console.log('\nAll queue tests passed.');

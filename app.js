@@ -42,8 +42,8 @@ if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) 
 }
 
 // --- Sentence queue ---
-const queue = new SentenceQueue((original, translation) => {
-  appendEntry(original, translation);
+const queue = new SentenceQueue((id, _original, translation) => {
+  resolveEntry(id, translation);
   updatePendingStatus();
 });
 
@@ -143,6 +143,7 @@ function startListening() {
         const text = result[0].transcript.trim();
         if (text && CHINESE_CHAR.test(text)) {
           const id = queue.add(text);
+          appendPendingEntry(id, text);
           worker.postMessage({ type: 'translate', payload: { id, text } });
           updatePendingStatus();
         }
@@ -226,36 +227,52 @@ function escapeHtml(str) {
 
 const MAX_ENTRIES = 200;
 let entryCount = 0;
+const entryById = new Map(); // id -> entry element, for in-place English fill-in
 
-function appendEntry(chinese, english) {
-  const isError = english === '[Translation error]';
+function appendPendingEntry(id, chinese) {
   const time = new Date().toTimeString().slice(0, 8);
 
   const entry = document.createElement('div');
   entry.className = 'entry';
-  entry.title = 'Click to copy translation';
-  entry.dataset.translation = english;
+  entry.dataset.id = String(id);
   entry.innerHTML =
     `<div class="entry-time">${time}</div>` +
     `<div class="entry-chinese">${escapeHtml(chinese)}</div>` +
-    `<div class="entry-english${isError ? ' error' : ''}">${escapeHtml(english)}</div>`;
+    `<div class="entry-english translating">translating…</div>`;
 
   transcript.insertBefore(entry, interimEl);
+  entryById.set(id, entry);
   entryCount++;
 
-  // Auto-scroll only if user is already near the bottom — preserves position
-  // when scrolling back to read older entries.
   const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
   if (atBottom) transcript.scrollTop = transcript.scrollHeight;
 
   // Cap transcript size. Counter + first-match query is amortized O(1) per
-  // append; the previous querySelectorAll('.entry') was O(n) every time.
+  // append; also drop the corresponding id from entryById to avoid leaks.
   while (entryCount > MAX_ENTRIES) {
     const first = transcript.querySelector('.entry');
     if (!first) { entryCount = 0; break; }
+    const oldId = Number(first.dataset.id);
+    if (Number.isFinite(oldId)) entryById.delete(oldId);
     first.remove();
     entryCount--;
   }
+}
+
+function resolveEntry(id, english) {
+  const entry = entryById.get(id);
+  entryById.delete(id);
+  if (!entry) return; // entry was evicted by the cap before its translation arrived
+  const isError = english === '[Translation error]';
+  entry.dataset.translation = english;
+  if (!isError) entry.title = 'Click to copy translation';
+  const englishEl = entry.querySelector('.entry-english');
+  englishEl.classList.remove('translating');
+  if (isError) englishEl.classList.add('error');
+  englishEl.textContent = english;
+
+  const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
+  if (atBottom) transcript.scrollTop = transcript.scrollHeight;
 }
 
 function updatePendingStatus() {
@@ -267,6 +284,7 @@ function updatePendingStatus() {
 // --- Clear ---
 clearBtn.addEventListener('click', () => {
   transcript.querySelectorAll('.entry').forEach(e => e.remove());
+  entryById.clear();
   entryCount = 0;
   interimEl.textContent = '';
 });

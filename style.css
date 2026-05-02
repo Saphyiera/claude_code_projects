@@ -138,6 +138,19 @@ button {
 .entry-chinese { color: #6c757d; font-size: 0.95rem; margin-bottom: 0.25rem; }
 .entry-english { font-weight: 600; font-size: 1rem; color: #212529; }
 .entry-english.error { color: #dc3545; font-weight: 400; font-style: italic; }
+.entry-english.translating {
+  color: #adb5bd;
+  font-weight: 400;
+  font-style: italic;
+  animation: translatingPulse 1.4s ease-in-out infinite;
+}
+@keyframes translatingPulse {
+  0%, 100% { opacity: 0.5; }
+  50%      { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .entry-english.translating { animation: none; opacity: 0.7; }
+}
 
 .interim {
   color: #adb5bd;
@@ -181,6 +194,7 @@ button {
   .entry.copied { background: #1f3a26; }
   .entry-chinese { color: #9aa3ad; }
   .entry-english { color: #f1f3f5; }
+  .entry-english.translating { color: #6c757d; }
   .interim { color: #6c757d; }
   #clear-btn { color: #adb5bd; }
   #clear-btn:hover { background: #23272e; color: #f1f3f5; }

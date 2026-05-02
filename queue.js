@@ -53,10 +53,11 @@ export class SentenceQueue {
 
   _flush() {
     while (this._results.has(this._nextDisplay)) {
-      const { original, translation } = this._results.get(this._nextDisplay);
-      this._results.delete(this._nextDisplay);
-      this._texts.delete(this._nextDisplay);
-      this._onResult(original, translation);
+      const id = this._nextDisplay;
+      const { original, translation } = this._results.get(id);
+      this._results.delete(id);
+      this._texts.delete(id);
+      this._onResult(id, original, translation);
       this._nextDisplay++;
     }
   }
