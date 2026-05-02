@@ -82,6 +82,12 @@ button {
 #mic-btn.listening:hover { background: #bb2d3b; }
 #mic-btn:disabled { background: #adb5bd; cursor: not-allowed; }
 
+#gpu-btn { background: #6c757d; color: white; }
+#gpu-btn:hover:not(:disabled) { background: #5c636a; }
+#gpu-btn.active { background: #198754; }
+#gpu-btn.active:hover:not(:disabled) { background: #157347; }
+#gpu-btn:disabled { background: #adb5bd; cursor: not-allowed; opacity: 0.7; }
+
 #listening-status { font-size: 0.875rem; color: #6c757d; }
 
 .transcript-container {

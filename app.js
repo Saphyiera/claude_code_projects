@@ -3,6 +3,7 @@ import { SentenceQueue } from './queue.js';
 
 // --- DOM refs ---
 const micBtn           = document.getElementById('mic-btn');
+const gpuBtn           = document.getElementById('gpu-btn');
 const listeningStatus  = document.getElementById('listening-status');
 const statusDot        = document.getElementById('status-dot');
 const statusText       = document.getElementById('status-text');
@@ -13,6 +14,25 @@ const clearBtn         = document.getElementById('clear-btn');
 const errorBanner      = document.getElementById('error-banner');
 const errorTextEl      = document.getElementById('error-text');
 const retryBtn         = document.getElementById('retry-btn');
+
+// --- Backend device (wasm = CPU, webgpu = GPU via WebGPU) ---
+const gpuSupported = 'gpu' in navigator;
+let requestedDevice = 'wasm'; // what the user asked for
+let activeDevice = 'wasm';    // what's actually loaded (may differ after fallback)
+
+function devicePretty(d) { return d === 'webgpu' ? 'GPU' : 'CPU'; }
+
+function updateGpuBtn() {
+  if (!gpuSupported) {
+    gpuBtn.hidden = true;
+    return;
+  }
+  gpuBtn.hidden = false;
+  const wantGpu = requestedDevice === 'webgpu';
+  gpuBtn.textContent = wantGpu ? 'Use CPU' : 'Use GPU';
+  gpuBtn.setAttribute('aria-pressed', wantGpu ? 'true' : 'false');
+  gpuBtn.classList.toggle('active', wantGpu);
+}
 
 // --- Browser support check ---
 if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
@@ -30,10 +50,12 @@ const queue = new SentenceQueue((original, translation) => {
 // --- Worker ---
 let worker = null;
 let lastProgressPct = -1;
+let pendingFallbackMessage = null;
 
 function initWorker() {
   worker = new Worker('./translator-worker.js', { type: 'module' });
-  worker.postMessage({ type: 'init' });
+  worker.postMessage({ type: 'init', payload: { device: requestedDevice } });
+  if (gpuSupported) gpuBtn.disabled = true;
 
   worker.onmessage = ({ data: { type, payload } }) => {
     if (type === 'progress') {
@@ -42,17 +64,30 @@ function initWorker() {
       lastProgressPct = pct;
       progressFill.style.width = `${pct}%`;
       progressFill.parentElement.setAttribute('aria-valuenow', pct);
-      statusText.textContent = `Loading model... ${pct}%`;
+      const label = devicePretty(requestedDevice);
+      statusText.textContent = `Loading model on ${label}... ${pct}%`;
       statusDot.className = 'status-dot loading';
     }
     if (type === 'ready') {
+      activeDevice = (payload && payload.device) || 'wasm';
+      requestedDevice = activeDevice; // sync UI to whatever actually loaded
       statusDot.className = 'status-dot ready';
-      statusText.textContent = 'Model ready';
+      statusText.textContent = `Model ready (${devicePretty(activeDevice)})`;
       progressFill.style.width = '100%';
       progressFill.parentElement.setAttribute('aria-valuenow', 100);
       const supported = ('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window);
       if (supported) micBtn.disabled = false;
+      if (gpuSupported) gpuBtn.disabled = false;
+      updateGpuBtn();
       hideError();
+      if (pendingFallbackMessage) {
+        showError(pendingFallbackMessage, false);
+        pendingFallbackMessage = null;
+      }
+    }
+    if (type === 'fallback') {
+      // Defer until after `ready` so it isn't wiped by hideError().
+      pendingFallbackMessage = `GPU not available for this model — using CPU. (${payload.reason})`;
     }
     if (type === 'translation') {
       queue.resolve(payload.id, payload.translated);
@@ -70,6 +105,20 @@ function initWorker() {
     queue.failPending();
     updatePendingStatus();
   };
+}
+
+function reloadWorker() {
+  micBtn.disabled = true;
+  if (gpuSupported) gpuBtn.disabled = true;
+  statusDot.className = 'status-dot';
+  statusText.textContent = `Loading model on ${devicePretty(requestedDevice)}...`;
+  progressFill.style.width = '0%';
+  progressFill.parentElement.setAttribute('aria-valuenow', 0);
+  lastProgressPct = -1;
+  if (worker) worker.terminate();
+  queue.failPending();
+  updatePendingStatus();
+  initWorker();
 }
 
 // --- Speech recognition ---
@@ -228,17 +277,18 @@ function hideError() {
 
 retryBtn.addEventListener('click', () => {
   hideError();
-  micBtn.disabled = true;
-  statusDot.className = 'status-dot';
-  statusText.textContent = 'Loading model...';
-  progressFill.style.width = '0%';
-  progressFill.parentElement.setAttribute('aria-valuenow', 0);
-  lastProgressPct = -1;
-  if (worker) worker.terminate();
-  queue.failPending();
-  updatePendingStatus();
-  initWorker();
+  reloadWorker();
 });
 
+if (gpuSupported) {
+  gpuBtn.addEventListener('click', () => {
+    requestedDevice = requestedDevice === 'webgpu' ? 'wasm' : 'webgpu';
+    updateGpuBtn();
+    hideError();
+    reloadWorker();
+  });
+}
+
 // --- Init ---
+updateGpuBtn();
 initWorker();

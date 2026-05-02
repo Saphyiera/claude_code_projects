@@ -10,20 +10,48 @@ let initPromise = null;
 // concurrently, and concurrent inference balloons memory on slow devices.
 let jobChain = Promise.resolve();
 
-function ensureInit() {
-  if (initPromise) return initPromise;
-  initPromise = pipeline('translation', 'Xenova/opus-mt-zh-en', {
+function loadPipeline(device) {
+  // `device: 'webgpu'` routes inference through ONNX Runtime Web's WebGPU
+  // backend. On NVIDIA Windows/Linux this lands on CUDA via the browser's
+  // GPU stack. Pass undefined to use the default (wasm/CPU).
+  const opts = {
     progress_callback: (progress) => {
       self.postMessage({ type: 'progress', payload: progress });
     },
-  }).then((t) => {
-    translator = t;
-    return t;
-  });
+  };
+  if (device && device !== 'wasm') opts.device = device;
+  return pipeline('translation', 'Xenova/opus-mt-zh-en', opts);
+}
+
+function ensureInit(requestedDevice) {
+  if (initPromise) return initPromise;
+  initPromise = (async () => {
+    try {
+      translator = await loadPipeline(requestedDevice);
+      return requestedDevice || 'wasm';
+    } catch (err) {
+      // Auto-fallback to CPU if GPU init failed (model not GPU-compatible,
+      // driver issue, etc.) so the user still gets translation.
+      if (requestedDevice && requestedDevice !== 'wasm') {
+        self.postMessage({
+          type: 'fallback',
+          payload: { from: requestedDevice, to: 'wasm', reason: err.message },
+        });
+        translator = await loadPipeline('wasm');
+        return 'wasm';
+      }
+      throw err;
+    }
+  })();
   return initPromise;
 }
 
 async function runTranslate(id, text) {
+  // If init is still in flight (e.g. user kept speaking during a device
+  // switch), wait for it rather than dropping the sentence.
+  if (initPromise) {
+    try { await initPromise; } catch { /* error surfaced separately */ }
+  }
   if (!translator) {
     self.postMessage({ type: 'translation-error', payload: { id } });
     return;
@@ -43,10 +71,12 @@ self.onmessage = (event) => {
   const { type, payload } = event.data;
 
   if (type === 'init') {
-    ensureInit()
-      .then(() => self.postMessage({ type: 'ready' }))
+    const device = (event.data.payload && event.data.payload.device) || 'wasm';
+    ensureInit(device)
+      .then((dev) => self.postMessage({ type: 'ready', payload: { device: dev } }))
       .catch((err) => {
         initPromise = null; // allow retry
+        translator = null;
         self.postMessage({ type: 'error', payload: err.message });
       });
     return;
