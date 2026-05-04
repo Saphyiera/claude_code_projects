@@ -1,44 +1,39 @@
 import 'dart:async';
+import 'dart:io';
+
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:whisper_ggml/whisper_ggml.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:path/path.dart' as p;
 
 // Silence threshold in dBFS. Audio below this level is considered silence.
 const double _silenceThresholdDb = -40.0;
-
-// How long continuous silence must last before we flush.
 const Duration _silenceDuration = Duration(milliseconds: 1500);
-
-// Hard cap: flush even if no silence detected.
 const Duration _hardCapDuration = Duration(seconds: 30);
+
+const _config =
+    RecordConfig(encoder: AudioEncoder.wav, sampleRate: 16000);
 
 final _cjk = RegExp(r'[一-鿿㐀-䶿]');
 
 enum WhisperModelSize {
-  tiny,   // ~75 MB  — fastest, good for conversational Mandarin
-  base,   // ~140 MB — balanced
-  small,  // ~460 MB — higher accuracy
+  tiny,   // ~75 MB
+  base,   // ~140 MB
+  small,  // ~460 MB
 }
 
 extension WhisperModelSizeExt on WhisperModelSize {
   WhisperModel get ggmlModel => const {
-    WhisperModelSize.tiny: WhisperModel.tiny,
-    WhisperModelSize.base: WhisperModel.base,
-    WhisperModelSize.small: WhisperModel.small,
-  }[this]!;
-
-  String get assetName => const {
-    WhisperModelSize.tiny: 'ggml-tiny.bin',
-    WhisperModelSize.base: 'ggml-base.bin',
-    WhisperModelSize.small: 'ggml-small.bin',
-  }[this]!;
+        WhisperModelSize.tiny: WhisperModel.tiny,
+        WhisperModelSize.base: WhisperModel.base,
+        WhisperModelSize.small: WhisperModel.small,
+      }[this]!;
 
   String get label => const {
-    WhisperModelSize.tiny: 'Tiny (~75 MB)',
-    WhisperModelSize.base: 'Base (~140 MB)',
-    WhisperModelSize.small: 'Small (~460 MB)',
-  }[this]!;
+        WhisperModelSize.tiny: 'Tiny (~75 MB)',
+        WhisperModelSize.base: 'Base (~140 MB)',
+        WhisperModelSize.small: 'Small (~460 MB)',
+      }[this]!;
 }
 
 class WhisperListener {
@@ -49,95 +44,163 @@ class WhisperListener {
   final _record = AudioRecorder();
   final _segments = StreamController<String>.broadcast();
   Whisper? _whisper;
-  bool _running = false;
+  String? _dir;
 
-  // VAD state
-  DateTime? _silenceSince;
+  bool _running = false;
+  bool _flushing = false;             // (002) serialize concurrent flush calls
+  int _wavSeq = 0;                    // (002, 015) rotating wav path
+  StreamSubscription<Amplitude>? _ampSub; // (004) cancellable subscription
   Timer? _hardCapTimer;
-  String? _wavPath;
+  DateTime? _silenceSince;
 
   Stream<String> get segments => _segments.stream;
 
+  String _wavPath(int seq) => p.join(_dir!, 'rolling-$seq.wav');
+
   Future<void> init() async {
-    final dir = await getApplicationSupportDirectory();
-    _wavPath = p.join(dir.path, 'rolling.wav');
+    _dir = (await getApplicationSupportDirectory()).path;
     _whisper = Whisper(model: modelSize.ggmlModel);
-    await _whisper!.initialize(modelDir: dir.path);
+    await _whisper!.initialize(modelDir: _dir!);
   }
 
   Future<void> reinit(WhisperModelSize newSize) async {
     await stop();
+    await _disposeWhisper();
     modelSize = newSize;
     _whisper = Whisper(model: newSize.ggmlModel);
-    final dir = await getApplicationSupportDirectory();
-    await _whisper!.initialize(modelDir: dir.path);
+    await _whisper!.initialize(modelDir: _dir!);
+  }
+
+  // (008) Best-effort release of the previous native context. The exact
+  // method name depends on whisper_ggml version — try each common one and
+  // swallow NoSuchMethodError if absent.
+  Future<void> _disposeWhisper() async {
+    final old = _whisper;
+    _whisper = null;
+    if (old == null) return;
+    final names = ['dispose', 'release', 'free', 'close'];
+    for (final name in names) {
+      try {
+        final dyn = old as dynamic;
+        switch (name) {
+          case 'dispose': await dyn.dispose(); return;
+          case 'release': await dyn.release(); return;
+          case 'free':    await dyn.free();    return;
+          case 'close':   await dyn.close();   return;
+        }
+      } catch (_) {
+        // Method doesn't exist on this version — try the next name.
+      }
+    }
   }
 
   Future<void> start() async {
     if (_running) return;
+    if (_whisper == null) {
+      throw StateError('WhisperListener.init() must be called before start()');
+    }
     _running = true;
     _silenceSince = null;
+    _wavSeq++;
 
-    await _record.start(
-      const RecordConfig(encoder: AudioEncoder.wav, sampleRate: 16000),
-      path: _wavPath!,
-    );
+    await _record.start(_config, path: _wavPath(_wavSeq));
 
-    // VAD: watch amplitude, flush on sustained silence.
-    _record.onAmplitude(interval: const Duration(milliseconds: 300)).listen(
-      (amp) {
-        if (!_running) return;
-        if (amp.current < _silenceThresholdDb) {
-          _silenceSince ??= DateTime.now();
-          if (DateTime.now().difference(_silenceSince!) >= _silenceDuration) {
-            _silenceSince = null;
-            _flush();
-          }
-        } else {
-          _silenceSince = null;
-        }
-      },
-    );
+    // (004) Hold the subscription so stop() can cancel it.
+    _ampSub = _record
+        .onAmplitude(const Duration(milliseconds: 300))
+        .listen(_onAmplitude);
 
-    // Hard cap: always flush after 30s even with continuous speech.
-    _hardCapTimer =
-        Timer.periodic(_hardCapDuration, (_) { if (_running) _flush(); });
+    _hardCapTimer = Timer.periodic(_hardCapDuration, (_) {
+      if (_running) _flush();
+    });
+  }
+
+  void _onAmplitude(Amplitude amp) {
+    if (!_running) return;
+    if (amp.current < _silenceThresholdDb) {
+      _silenceSince ??= DateTime.now();
+      if (DateTime.now().difference(_silenceSince!) >= _silenceDuration) {
+        _silenceSince = null;
+        _flush();
+      }
+    } else {
+      _silenceSince = null;
+    }
   }
 
   Future<void> stop() async {
+    if (!_running && _ampSub == null) return;
     _running = false;
     _hardCapTimer?.cancel();
     _hardCapTimer = null;
+    await _ampSub?.cancel();
+    _ampSub = null;
     _silenceSince = null;
-    await _record.stop();
-    await _flush(final_: true);
+
+    // (003) Capture the path once and transcribe directly. No second stop().
+    String? path;
+    try {
+      path = await _record.stop();
+    } catch (_) {
+      path = null;
+    }
+    if (path != null) await _transcribe(path);
   }
 
-  Future<void> _flush({bool final_ = false}) async {
-    if (!final_ && !_running) return;
-    final path = await _record.stop();
+  // (002) Single point of entry for mid-recording flushes. Serialized so
+  // VAD and the hard-cap timer can't both stop+start the recorder.
+  Future<void> _flush() async {
+    if (_flushing) return;
+    _flushing = true;
+    try {
+      final wasRunning = _running;
+      String? path;
+      try {
+        path = await _record.stop();
+      } catch (_) {
+        path = null;
+      }
+      if (wasRunning && _running) {
+        // (015) Rotate path so the next chunk doesn't collide with the
+        // file we're about to transcribe.
+        _wavSeq++;
+        try {
+          await _record.start(_config, path: _wavPath(_wavSeq));
+        } catch (e) {
+          // ignore: avoid_print
+          print('[whisper] failed to restart recorder: $e');
+          _running = false;
+        }
+      }
+      if (path != null) await _transcribe(path);
+    } finally {
+      _flushing = false;
+    }
+  }
 
-    if (_running) {
-      // Restart capture immediately so we don't lose audio while processing.
-      await _record.start(
-        const RecordConfig(encoder: AudioEncoder.wav, sampleRate: 16000),
-        path: _wavPath!,
+  Future<void> _transcribe(String path) async {
+    final w = _whisper;
+    if (w == null) return;
+    try {
+      final result = await w.transcribe(
+        transcribeRequest: TranscribeRequest(audio: path, language: 'zh'),
       );
-    }
-
-    if (path == null) return;
-
-    final result = await _whisper!.transcribe(
-      transcribeRequest: TranscribeRequest(audio: path, language: 'zh'),
-    );
-    final text = (result.transcription?.text ?? '').trim();
-    if (text.isNotEmpty && _cjk.hasMatch(text)) {
-      _segments.add(text);
+      final text = (result.transcription?.text ?? '').trim();
+      if (text.isNotEmpty && _cjk.hasMatch(text) && !_segments.isClosed) {
+        _segments.add(text);
+      }
+    } catch (e) {
+      // ignore: avoid_print
+      print('[whisper] transcribe failed: $e');
+    } finally {
+      // Tidy up the consumed wav so we don't fill ApplicationSupport.
+      try { await File(path).delete(); } catch (_) {}
     }
   }
 
-  void dispose() {
-    stop();
-    _segments.close();
+  Future<void> dispose() async {
+    await stop();
+    await _disposeWhisper();
+    if (!_segments.isClosed) await _segments.close();
   }
 }

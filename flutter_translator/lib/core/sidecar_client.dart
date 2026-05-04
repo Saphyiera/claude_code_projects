@@ -27,9 +27,13 @@ class SidecarClient {
 
   Process? _proc;
   WebSocketChannel? _ws;
-  bool _intentionalStop = false;
+  Future<void>? _starting;       // guards concurrent start() (010)
+  bool _disposed = false;
   int _retryCount = 0;
   static const int _maxRetries = 3;
+
+  // Wait long enough for first-run model load + manifest hash. (013)
+  static const Duration _portWaitTimeout = Duration(seconds: 120);
 
   final _events = StreamController<SidecarMessage>.broadcast();
   Stream<SidecarMessage> get events => _events.stream;
@@ -37,62 +41,111 @@ class SidecarClient {
   String _activeDevice = 'cpu';
   String get activeDevice => _activeDevice;
 
-  // On macOS, let CT2 pick the best CPU backend (Accelerate BLAS).
-  // GPU toggle is hidden on macOS in the UI.
+  // On macOS the GPU toggle is hidden; CT2 uses Apple Accelerate BLAS.
   String get _deviceArg {
     if (Platform.isMacOS) return 'cpu';
     return preferCuda ? 'cuda' : 'cpu';
   }
 
   Future<void> start() async {
-    _intentionalStop = false;
+    if (_disposed) return;
+    if (_starting != null) return _starting;     // (010)
+    final c = Completer<void>();
+    _starting = c.future;
+    try {
+      await _doStart();
+      c.complete();
+    } catch (e, st) {
+      c.completeError(e, st);
+      rethrow;
+    } finally {
+      _starting = null;
+    }
+  }
+
+  Future<void> _doStart() async {
     final port = await _freePort();
     final python = Platform.isWindows
         ? p.join(sidecarDir, 'venv', 'Scripts', 'python.exe')
         : p.join(sidecarDir, 'venv', 'bin', 'python');
 
-    _proc = await Process.start(
+    // ProcessStartMode.normal so the child is in our process group on
+    // Unix and dies with us on a clean shutdown. (011)
+    final proc = await Process.start(
       python,
       [
         p.join(sidecarDir, 'server.py'),
         '--port', '$port',
         '--device', _deviceArg,
       ],
-      mode: ProcessStartMode.detachedWithStdio,
+      mode: ProcessStartMode.normal,
     );
+    _proc = proc;
 
-    _proc!.stderr.transform(utf8.decoder).listen((line) {
+    // Drain stdout (avoid pipe backpressure deadlock) — keep silent. (011)
+    proc.stdout.drain<void>();
+
+    // Stream stderr line-by-line. (012)
+    proc.stderr
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .listen((line) {
       // ignore: avoid_print
       print('[sidecar] $line');
     });
 
-    _watchProcess();
+    _watchProcess(proc);
 
-    await _waitForPort(port);
-    _ws = IOWebSocketChannel.connect(Uri.parse('ws://127.0.0.1:$port/ws'));
-    _ws!.stream.listen(_onMessage, onError: (e) {
-      _events.add(SidecarMessage(SidecarEvent.error, {'reason': '$e'}));
-    });
+    try {
+      await _waitForPort(port);
+    } catch (e) {
+      // Port never opened — kill the orphan, surface the error.
+      proc.kill(ProcessSignal.sigterm);
+      rethrow;
+    }
+
+    final ws = IOWebSocketChannel.connect(Uri.parse('ws://127.0.0.1:$port/ws'));
+    _ws = ws;
+    ws.stream.listen(
+      _onMessage,
+      onError: (e) =>
+          _emit(SidecarEvent.error, {'reason': '$e'}),
+      onDone: () {
+        // (005) Treat clean WS close as a fault so callers stop hanging.
+        if (identical(_ws, ws)) {
+          _ws = null;
+          _emit(SidecarEvent.error, {'reason': 'sidecar disconnected'});
+        }
+      },
+      cancelOnError: true,
+    );
   }
 
-  // Watchdog: if the sidecar crashes unexpectedly, retry with backoff.
-  void _watchProcess() {
-    _proc?.exitCode.then((code) {
-      if (_intentionalStop) return;
+  // Watchdog — only retries when *this* process is still the active one. (001)
+  void _watchProcess(Process proc) {
+    proc.exitCode.then((code) {
+      if (!identical(_proc, proc)) return; // already replaced (e.g., by switchDevice)
+      _proc = null;
+      _ws = null;
+      if (_disposed) return;
       if (_retryCount < _maxRetries) {
         _retryCount++;
         final delay = Duration(seconds: _retryCount * 2);
-        _events.add(SidecarMessage(SidecarEvent.error, {
+        _emit(SidecarEvent.error, {
           'reason': 'sidecar exited (code $code), retrying in ${delay.inSeconds}s '
               '(attempt $_retryCount/$_maxRetries)',
-        }));
+        });
         Future.delayed(delay, () {
-          if (!_intentionalStop) start();
+          // Skip the retry if disposal or a manual start has happened
+          // since the watchdog scheduled it.
+          if (_disposed || _proc != null || _starting != null) return;
+          start().catchError((e) =>
+              _emit(SidecarEvent.error, {'reason': 'restart failed: $e'}));
         });
       } else {
-        _events.add(SidecarMessage(SidecarEvent.error, {
+        _emit(SidecarEvent.error, {
           'reason': 'sidecar crashed (code $code); max retries exceeded',
-        }));
+        });
       }
     });
   }
@@ -101,33 +154,43 @@ class SidecarClient {
     final m = jsonDecode(raw as String) as Map<String, dynamic>;
     switch (m['type']) {
       case 'ready':
-        _retryCount = 0; // successful start resets retry counter
+        _retryCount = 0;
         _activeDevice = m['device'] as String;
-        _events.add(SidecarMessage(SidecarEvent.ready, {'device': _activeDevice}));
+        _emit(SidecarEvent.ready, {'device': _activeDevice});
         break;
       case 'fallback':
         _activeDevice = m['to'] as String;
-        _events.add(SidecarMessage(SidecarEvent.fallback, m.cast()));
+        _emit(SidecarEvent.fallback, m.cast());
         break;
       case 'translation':
-        _events.add(SidecarMessage(SidecarEvent.translation, m.cast()));
+        _emit(SidecarEvent.translation, m.cast());
         break;
       case 'translation-error':
-        _events.add(SidecarMessage(SidecarEvent.translationError, m.cast()));
+        _emit(SidecarEvent.translationError, m.cast());
         break;
       case 'error':
-        _events.add(SidecarMessage(SidecarEvent.error, m.cast()));
+        _emit(SidecarEvent.error, m.cast());
         break;
     }
   }
 
-  void translate(int id, String text) {
-    _ws?.sink.add(jsonEncode({
-      'type': 'translate',
-      'id': id,
-      'text': text,
-      'beam_size': beamSize,
-    }));
+  /// Enqueue a translation. Returns true if the request was sent;
+  /// false if the sidecar isn't connected (caller should resolve the
+  /// queue entry as an error so the UI doesn't hang). (006)
+  bool translate(int id, String text) {
+    final ws = _ws;
+    if (ws == null) return false;
+    try {
+      ws.sink.add(jsonEncode({
+        'type': 'translate',
+        'id': id,
+        'text': text,
+        'beam_size': beamSize,
+      }));
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<void> switchDevice({required bool cuda}) async {
@@ -137,16 +200,31 @@ class SidecarClient {
   }
 
   Future<void> stop() async {
-    _intentionalStop = true;
-    await _ws?.sink.close();
-    _proc?.kill(ProcessSignal.sigterm);
+    final proc = _proc;
+    final ws = _ws;
     _proc = null;
     _ws = null;
+    try { await ws?.sink.close(); } catch (_) {}
+    proc?.kill(ProcessSignal.sigterm);
+    if (proc != null) {
+      // Wait briefly so the next start() doesn't race the previous shutdown.
+      await proc.exitCode.timeout(
+        const Duration(seconds: 5),
+        onTimeout: () { proc.kill(ProcessSignal.sigkill); return -1; },
+      );
+    }
   }
 
-  void dispose() {
-    stop();
-    _events.close();
+  Future<void> dispose() async {
+    if (_disposed) return;
+    _disposed = true;
+    await stop();
+    if (!_events.isClosed) await _events.close();
+  }
+
+  void _emit(SidecarEvent e, Map<String, dynamic> payload) {
+    if (_disposed || _events.isClosed) return;
+    _events.add(SidecarMessage(e, payload));
   }
 
   static Future<int> _freePort() async {
@@ -157,7 +235,7 @@ class SidecarClient {
   }
 
   static Future<void> _waitForPort(int port,
-      {Duration timeout = const Duration(seconds: 30)}) async {
+      {Duration timeout = _portWaitTimeout}) async {
     final deadline = DateTime.now().add(timeout);
     while (DateTime.now().isBefore(deadline)) {
       try {
@@ -170,6 +248,6 @@ class SidecarClient {
         await Future.delayed(const Duration(milliseconds: 200));
       }
     }
-    throw TimeoutException('sidecar did not open port $port');
+    throw TimeoutException('sidecar did not open port $port within $timeout');
   }
 }

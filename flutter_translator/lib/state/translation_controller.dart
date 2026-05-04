@@ -37,33 +37,51 @@ class TranslationController extends ChangeNotifier {
   final Map<int, TranscriptEntry> _byId = {};
 
   bool _listening = false;
+  bool _ready = false;                  // (009) bootstrap status
+  String? _initError;                   // (009)
   int _beamSize = 2;
   WhisperModelSize _modelSize = WhisperModelSize.tiny;
+  String? _statusMessage;
 
   bool get listening => _listening;
+  bool get ready => _ready;
+  String? get initError => _initError;
   bool get cudaActive => _sidecar.activeDevice == 'cuda';
   bool get isMacOS => Platform.isMacOS;
   int get pending => _queue.pending;
   int get beamSize => _beamSize;
   WhisperModelSize get modelSize => _modelSize;
-
-  String? _statusMessage;
   String? get statusMessage => _statusMessage;
 
   static const int maxEntries = 200;
 
+  // (009) bootstrap is non-throwing: any failure surfaces via initError
+  // so the UI can render an error screen instead of crashing main().
   Future<void> bootstrap() async {
-    await _whisper.init();
-    await _sidecar.start();
-    _sidecar.events.listen(_onSidecarEvent);
-    _whisper.segments.listen(_onSegment);
+    try {
+      await _whisper.init();
+      _sidecar.events.listen(_onSidecarEvent);
+      _whisper.segments.listen(_onSegment);
+      await _sidecar.start();
+      _ready = true;
+      notifyListeners();
+    } catch (e) {
+      _initError = '$e';
+      notifyListeners();
+    }
   }
 
   Future<void> startListening() async {
-    if (_listening) return;
+    if (_listening || !_ready) return;
     _listening = true;
     notifyListeners();
-    await _whisper.start();
+    try {
+      await _whisper.start();
+    } catch (e) {
+      _listening = false;
+      _statusMessage = 'Microphone error: $e';
+      notifyListeners();
+    }
   }
 
   Future<void> stopListening() async {
@@ -79,18 +97,14 @@ class TranslationController extends ChangeNotifier {
     notifyListeners();
   }
 
-  // Graceful device switch: let in-flight translations resolve before
-  // restarting. failPending() errors out anything still queued after
-  // the restart so the UI never hangs on a stale entry.
   Future<void> toggleCuda() async {
     if (Platform.isMacOS) return;
-    await _sidecar.stop();
     _queue.failPending();
     await _sidecar.switchDevice(cuda: !_sidecar.preferCuda);
     notifyListeners();
   }
 
-  Future<void> setBeamSize(int size) async {
+  void setBeamSize(int size) {
     _beamSize = size;
     _sidecar.beamSize = size;
     notifyListeners();
@@ -101,21 +115,33 @@ class TranslationController extends ChangeNotifier {
     final wasListening = _listening;
     if (wasListening) await stopListening();
     _modelSize = size;
-    await _whisper.reinit(size);
+    try {
+      await _whisper.reinit(size);
+    } catch (e) {
+      _statusMessage = 'Model load failed: $e';
+      notifyListeners();
+      return;
+    }
     if (wasListening) await startListening();
     notifyListeners();
   }
 
   void _onSegment(String chinese) {
     final id = _queue.add(chinese);
-    final entry = TranscriptEntry(id: id, time: DateTime.now(), chinese: chinese);
+    final entry =
+        TranscriptEntry(id: id, time: DateTime.now(), chinese: chinese);
     _byId[id] = entry;
     entries.add(entry);
     while (entries.length > maxEntries) {
       final removed = entries.removeAt(0);
       _byId.remove(removed.id);
     }
-    _sidecar.translate(id, chinese);
+
+    // (006) If the sidecar is mid-restart, mark the entry as errored
+    // immediately so the UI doesn't hang on a request that was never sent.
+    final sent = _sidecar.translate(id, chinese);
+    if (!sent) _queue.resolveError(id);
+
     notifyListeners();
   }
 
@@ -139,6 +165,9 @@ class TranslationController extends ChangeNotifier {
         break;
       case SidecarEvent.error:
         _statusMessage = m.payload['reason'] as String?;
+        // Disconnect / restart in flight: error any still-pending entries
+        // so the UI doesn't keep showing "translating…" indefinitely.
+        _queue.failPending();
         notifyListeners();
         break;
     }

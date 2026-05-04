@@ -140,24 +140,39 @@ async def ws_endpoint(ws: WebSocket) -> None:
     loop = asyncio.get_running_loop()
     try:
         while True:
-            msg = json.loads(await ws.receive_text())
-            if msg.get("type") == "translate":
-                tid = msg["id"]
-                beam = int(msg.get("beam_size", 2))
-                try:
-                    translated = await loop.run_in_executor(
-                        None, translate_text, msg["text"], beam
-                    )
-                    await ws.send_text(
-                        json.dumps(
-                            {"type": "translation", "id": tid, "translated": translated}
-                        )
-                    )
-                except Exception:
-                    traceback.print_exc()
-                    await ws.send_text(
-                        json.dumps({"type": "translation-error", "id": tid})
-                    )
+            try:
+                raw = await ws.receive_text()
+                msg = json.loads(raw)
+            except json.JSONDecodeError as e:
+                # (014) Bad JSON shouldn't tear down the connection.
+                print(f"[sidecar] dropped malformed JSON: {e}",
+                      file=sys.stderr, flush=True)
+                continue
+
+            if msg.get("type") != "translate":
+                continue
+
+            # (014) Validate payload before doing work.
+            tid = msg.get("id")
+            text = msg.get("text")
+            if tid is None or not isinstance(text, str):
+                print(f"[sidecar] dropped malformed translate request: {msg!r}",
+                      file=sys.stderr, flush=True)
+                continue
+
+            beam = int(msg.get("beam_size", 2))
+            try:
+                translated = await loop.run_in_executor(
+                    None, translate_text, text, beam
+                )
+                await ws.send_text(json.dumps(
+                    {"type": "translation", "id": tid, "translated": translated}
+                ))
+            except Exception:
+                traceback.print_exc()
+                await ws.send_text(json.dumps(
+                    {"type": "translation-error", "id": tid}
+                ))
     except WebSocketDisconnect:
         pass
 
