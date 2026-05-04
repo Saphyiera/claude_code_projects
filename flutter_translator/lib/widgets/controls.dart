@@ -10,29 +10,48 @@ class Controls extends StatelessWidget {
   Widget build(BuildContext context) {
     final ctl = context.watch<TranslationController>();
     return Padding(
-      padding: const EdgeInsets.all(12),
-      child: Row(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          FilledButton.icon(
-            onPressed: () =>
-                ctl.listening ? ctl.stopListening() : ctl.startListening(),
-            icon: Icon(ctl.listening ? Icons.stop : Icons.mic),
-            label: Text(ctl.listening ? 'Stop Listening' : 'Start Listening'),
-            style: FilledButton.styleFrom(
-              backgroundColor: ctl.listening ? Colors.red : null,
+          Row(
+            children: [
+              FilledButton.icon(
+                onPressed: () =>
+                    ctl.listening ? ctl.stopListening() : ctl.startListening(),
+                icon: Icon(ctl.listening ? Icons.stop : Icons.mic),
+                label: Text(ctl.listening ? 'Stop' : 'Start Listening'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: ctl.listening ? Colors.red : null,
+                ),
+              ),
+              const Spacer(),
+              if (ctl.listening)
+                Text(
+                  ctl.pending > 0
+                      ? 'listening… (${ctl.pending} pending)'
+                      : 'listening…',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              const SizedBox(width: 8),
+              IconButton(
+                tooltip: 'Settings',
+                icon: const Icon(Icons.tune),
+                onPressed: () => Scaffold.of(context).openEndDrawer(),
+              ),
+            ],
+          ),
+          if (ctl.statusMessage != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                ctl.statusMessage!,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+              ),
             ),
-          ),
-          const SizedBox(width: 12),
-          OutlinedButton.icon(
-            onPressed: () => ctl.toggleCuda(),
-            icon: Icon(ctl.cudaActive ? Icons.flash_on : Icons.flash_off),
-            label: Text(ctl.cudaActive ? 'Use CPU' : 'Use GPU'),
-          ),
-          const Spacer(),
-          if (ctl.listening)
-            Text(ctl.pending > 0
-                ? 'listening… (${ctl.pending} pending)'
-                : 'listening…'),
         ],
       ),
     );

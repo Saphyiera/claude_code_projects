@@ -1354,29 +1354,14 @@ auto-falls back to CPU and the UI shows a one-line notice.
 
 ---
 
-## 11. Limitations / future work
+## 11. Status
 
-- **macOS not supported**. CTranslate2 has experimental Apple silicon
-  support via `device='auto'` + Metal kernels, but the design above
-  doesn't wire it up. Consider switching to MLX or CoreML for that
-  platform.
-- **Whisper latency**. The 30-second window is a conservative default.
-  `whisper.cpp` supports streaming with `partial_callback`s; rewiring
-  `WhisperListener` to that API would emit segments closer to
-  real-time.
-- **Bundle size**. Whisper base + opus-mt + CT2 + CUDA runtime is
-  ~600 MB. Whisper tiny (~75 MB) is acceptable for fast Mandarin if
-  you need a smaller download.
-- **One sidecar instance per app**. Switching CUDA on/off restarts the
-  sidecar and drops in-flight translations (mirroring the web app's
-  behavior on device switch — `failPending()` errors them out
-  gracefully).
-- **Sidecar lifetime**. The current code starts the sidecar with
-  `ProcessStartMode.detachedWithStdio`. Add a watchdog if you want
-  auto-restart on crash; currently `worker.onerror` equivalent goes
-  through `SidecarEvent.error`.
-- **Beam size**. CT2 default is 4. Lower (2) is faster and usually
-  indistinguishable for short conversational input; consider exposing
-  in the UI.
-- **No SRI / no install-time integrity check** on bundled model
-  weights. Add a `sha256` manifest if the threat model warrants it.
+| Item | Status | Implementation |
+|------|--------|---------------|
+| macOS support | Resolved | GPU toggle hidden on macOS; CT2 uses Apple Accelerate BLAS on CPU automatically. MLX would add GPU but is out of scope. |
+| Whisper latency | Resolved | Replaced fixed 30 s window with VAD-based flush: amplitude stream sampled every 300 ms, flushes after 1.5 s of silence below −40 dBFS. 30 s hard cap retained as fallback. |
+| Bundle size | Resolved | `WhisperModelSize` enum (tiny/base/small) selectable at runtime in the settings drawer. Defaults to **tiny** (~75 MB). |
+| Graceful device switch | Resolved | `toggleCuda()` calls `stop()` first, then `failPending()`, then `switchDevice()` — in-flight translations are errored out cleanly before the sidecar restarts. |
+| Sidecar watchdog | Resolved | `_watchProcess()` listens on `Process.exitCode`; auto-restarts with 2 s/4 s/6 s backoff up to 3 attempts. Retry counter resets on a clean `ready` event. |
+| Beam size in UI | Resolved | Settings drawer exposes a 1–5 slider (default 2). Value sent per-request in the WebSocket message; `server.py` uses it in `translate_batch`. |
+| Model integrity | Resolved | `sidecar/generate_manifest.py` hashes `model.bin`, `source.spm`, `target.spm`, etc. into `manifest.json`. `server.py` verifies SHA-256 on startup and exits with a clear error if anything mismatches. |

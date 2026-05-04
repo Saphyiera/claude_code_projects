@@ -15,20 +15,37 @@ class SidecarMessage {
 }
 
 class SidecarClient {
-  SidecarClient({required this.sidecarDir, this.preferCuda = false});
+  SidecarClient({
+    required this.sidecarDir,
+    this.preferCuda = false,
+    this.beamSize = 2,
+  });
 
   final String sidecarDir;
   bool preferCuda;
+  int beamSize;
 
   Process? _proc;
   WebSocketChannel? _ws;
+  bool _intentionalStop = false;
+  int _retryCount = 0;
+  static const int _maxRetries = 3;
+
   final _events = StreamController<SidecarMessage>.broadcast();
   Stream<SidecarMessage> get events => _events.stream;
 
   String _activeDevice = 'cpu';
   String get activeDevice => _activeDevice;
 
+  // On macOS, let CT2 pick the best CPU backend (Accelerate BLAS).
+  // GPU toggle is hidden on macOS in the UI.
+  String get _deviceArg {
+    if (Platform.isMacOS) return 'cpu';
+    return preferCuda ? 'cuda' : 'cpu';
+  }
+
   Future<void> start() async {
+    _intentionalStop = false;
     final port = await _freePort();
     final python = Platform.isWindows
         ? p.join(sidecarDir, 'venv', 'Scripts', 'python.exe')
@@ -39,7 +56,7 @@ class SidecarClient {
       [
         p.join(sidecarDir, 'server.py'),
         '--port', '$port',
-        '--device', preferCuda ? 'cuda' : 'cpu',
+        '--device', _deviceArg,
       ],
       mode: ProcessStartMode.detachedWithStdio,
     );
@@ -49,6 +66,8 @@ class SidecarClient {
       print('[sidecar] $line');
     });
 
+    _watchProcess();
+
     await _waitForPort(port);
     _ws = IOWebSocketChannel.connect(Uri.parse('ws://127.0.0.1:$port/ws'));
     _ws!.stream.listen(_onMessage, onError: (e) {
@@ -56,10 +75,33 @@ class SidecarClient {
     });
   }
 
+  // Watchdog: if the sidecar crashes unexpectedly, retry with backoff.
+  void _watchProcess() {
+    _proc?.exitCode.then((code) {
+      if (_intentionalStop) return;
+      if (_retryCount < _maxRetries) {
+        _retryCount++;
+        final delay = Duration(seconds: _retryCount * 2);
+        _events.add(SidecarMessage(SidecarEvent.error, {
+          'reason': 'sidecar exited (code $code), retrying in ${delay.inSeconds}s '
+              '(attempt $_retryCount/$_maxRetries)',
+        }));
+        Future.delayed(delay, () {
+          if (!_intentionalStop) start();
+        });
+      } else {
+        _events.add(SidecarMessage(SidecarEvent.error, {
+          'reason': 'sidecar crashed (code $code); max retries exceeded',
+        }));
+      }
+    });
+  }
+
   void _onMessage(dynamic raw) {
     final m = jsonDecode(raw as String) as Map<String, dynamic>;
     switch (m['type']) {
       case 'ready':
+        _retryCount = 0; // successful start resets retry counter
         _activeDevice = m['device'] as String;
         _events.add(SidecarMessage(SidecarEvent.ready, {'device': _activeDevice}));
         break;
@@ -80,7 +122,12 @@ class SidecarClient {
   }
 
   void translate(int id, String text) {
-    _ws?.sink.add(jsonEncode({'type': 'translate', 'id': id, 'text': text}));
+    _ws?.sink.add(jsonEncode({
+      'type': 'translate',
+      'id': id,
+      'text': text,
+      'beam_size': beamSize,
+    }));
   }
 
   Future<void> switchDevice({required bool cuda}) async {
@@ -90,6 +137,7 @@ class SidecarClient {
   }
 
   Future<void> stop() async {
+    _intentionalStop = true;
     await _ws?.sink.close();
     _proc?.kill(ProcessSignal.sigterm);
     _proc = null;

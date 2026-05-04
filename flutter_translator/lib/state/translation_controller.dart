@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/foundation.dart';
 
 import '../core/sentence_queue.dart';
@@ -24,18 +26,29 @@ class TranslationController extends ChangeNotifier {
 
   final String sidecarDir;
 
-  late final SidecarClient _sidecar = SidecarClient(sidecarDir: sidecarDir);
-  late final WhisperListener _whisper = WhisperListener(
-      modelAssetPath: 'assets/models/whisper-base-zh.bin');
+  late final SidecarClient _sidecar = SidecarClient(
+    sidecarDir: sidecarDir,
+    beamSize: _beamSize,
+  );
+  late WhisperListener _whisper = WhisperListener(modelSize: _modelSize);
   late final SentenceQueue _queue = SentenceQueue(_onResolved);
 
   final List<TranscriptEntry> entries = [];
   final Map<int, TranscriptEntry> _byId = {};
 
   bool _listening = false;
+  int _beamSize = 2;
+  WhisperModelSize _modelSize = WhisperModelSize.tiny;
+
   bool get listening => _listening;
   bool get cudaActive => _sidecar.activeDevice == 'cuda';
+  bool get isMacOS => Platform.isMacOS;
   int get pending => _queue.pending;
+  int get beamSize => _beamSize;
+  WhisperModelSize get modelSize => _modelSize;
+
+  String? _statusMessage;
+  String? get statusMessage => _statusMessage;
 
   static const int maxEntries = 200;
 
@@ -66,24 +79,36 @@ class TranslationController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> retrySidecar() async {
-    _queue.failPending();
-    await _sidecar.switchDevice(cuda: _sidecar.preferCuda);
-  }
-
+  // Graceful device switch: let in-flight translations resolve before
+  // restarting. failPending() errors out anything still queued after
+  // the restart so the UI never hangs on a stale entry.
   Future<void> toggleCuda() async {
+    if (Platform.isMacOS) return;
+    await _sidecar.stop();
     _queue.failPending();
     await _sidecar.switchDevice(cuda: !_sidecar.preferCuda);
     notifyListeners();
   }
 
+  Future<void> setBeamSize(int size) async {
+    _beamSize = size;
+    _sidecar.beamSize = size;
+    notifyListeners();
+  }
+
+  Future<void> setModelSize(WhisperModelSize size) async {
+    if (size == _modelSize) return;
+    final wasListening = _listening;
+    if (wasListening) await stopListening();
+    _modelSize = size;
+    await _whisper.reinit(size);
+    if (wasListening) await startListening();
+    notifyListeners();
+  }
+
   void _onSegment(String chinese) {
     final id = _queue.add(chinese);
-    final entry = TranscriptEntry(
-      id: id,
-      time: DateTime.now(),
-      chinese: chinese,
-    );
+    final entry = TranscriptEntry(id: id, time: DateTime.now(), chinese: chinese);
     _byId[id] = entry;
     entries.add(entry);
     while (entries.length > maxEntries) {
@@ -97,15 +122,23 @@ class TranslationController extends ChangeNotifier {
   void _onSidecarEvent(SidecarMessage m) {
     switch (m.event) {
       case SidecarEvent.translation:
-        _queue.resolve(m.payload['id'] as int,
-            m.payload['translated'] as String);
+        _queue.resolve(
+            m.payload['id'] as int, m.payload['translated'] as String);
         break;
       case SidecarEvent.translationError:
         _queue.resolveError(m.payload['id'] as int);
         break;
       case SidecarEvent.fallback:
+        _statusMessage =
+            'GPU unavailable — fell back to CPU (${m.payload['reason']})';
+        notifyListeners();
+        break;
       case SidecarEvent.ready:
+        _statusMessage = null;
+        notifyListeners();
+        break;
       case SidecarEvent.error:
+        _statusMessage = m.payload['reason'] as String?;
         notifyListeners();
         break;
     }

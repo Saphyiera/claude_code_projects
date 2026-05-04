@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'widgets/controls.dart';
+import 'widgets/settings_drawer.dart';
 import 'widgets/transcript.dart';
 
 class TranslatorApp extends StatelessWidget {
@@ -20,15 +21,25 @@ class TranslatorApp extends StatelessWidget {
         brightness: Brightness.dark,
         colorSchemeSeed: const Color(0xFF0D6EFD),
       ),
-      home: const Scaffold(
-        body: SafeArea(
-          child: Column(
-            children: [
-              Controls(),
-              Divider(height: 1),
-              Expanded(child: TranscriptList()),
-            ],
-          ),
+      home: const _Home(),
+    );
+  }
+}
+
+class _Home extends StatelessWidget {
+  const _Home();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      endDrawer: SettingsDrawer(),
+      body: SafeArea(
+        child: Column(
+          children: [
+            Controls(),
+            Divider(height: 1),
+            Expanded(child: TranscriptList()),
+          ],
         ),
       ),
     );
